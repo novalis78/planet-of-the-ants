@@ -8,6 +8,17 @@ let queenGridY = -1; // Queen's current grid Y coordinate (underground)
 let isQueenSelected = false;
 let holeMesh = null; 
 
+// Texture and sprite system
+let spriteLoader = {
+    textures: {},
+    spriteSheets: {
+        ant: { file: 'sprite_sheet_ant.png', rows: 3, cols: 2, frames: 6 },
+        queen: { file: 'sprite_sheet_queen.png', rows: 3, cols: 2, frames: 6 },
+        seedling: { file: 'sprite_sheet_seedling.png', rows: 1, cols: 4, frames: 4 }
+    },
+    loaded: false
+};
+
 // NEW: Egg variables
 let eggs = []; // Array to store egg data { mesh: eggMesh, hatchTimer: time }
 const EGG_LAY_INTERVAL = 5.0; // Seconds between laying eggs
@@ -27,6 +38,16 @@ const PHEROMONE_TYPES = {
     DANGER: { color: 0xff0000, strength: 1.0, decayRate: 0.08 } // Red (decays faster)
 };
 const PHEROMONE_INFLUENCE_RADIUS = 1.5; // How far ants can detect pheromones
+
+// Food system
+let foodSources = []; // Array to store food sources
+const FOOD_GROWTH_STAGES = 4; // Number of growth stages for plants (seedling sprite)
+const FOOD_GROWTH_TIME = 30.0; // Time to grow to next stage
+const FOOD_SPAWN_INTERVAL = 15.0; // Seconds between spawning new food (on surface)
+const FOOD_SPAWN_RADIUS = 15.0; // Max distance from center to spawn food
+const FOOD_INITIAL_AMOUNT = 50; // Initial food amount per source
+const FOOD_CARRY_CAPACITY = 5; // How much food a worker can carry
+let timeSinceLastFoodSpawn = 0;
 
 // NEW: Underground representation
 const undergroundWidth = 20; // How many voxels wide (X axis)
@@ -120,47 +141,143 @@ function init() {
     window.addEventListener('click', onClick);
     window.addEventListener('keydown', onKeyDown); // NEW: Listener for key presses
 
+    // Load textures
+    loadTextures(() => {
+        console.log("All textures loaded!");
+        spriteLoader.loaded = true;
+        
+        // Create initial food sources after textures are loaded
+        createInitialFoodSources(5); // Start with 5 food sources
+    });
+    
     // Start the animation loop
     animate();
+}
+
+// Texture loading function
+function loadTextures(callback) {
+    const textureLoader = new THREE.TextureLoader();
+    const totalTextures = Object.keys(spriteLoader.spriteSheets).length;
+    let loadedTextures = 0;
+    
+    // Load each sprite sheet
+    for (const [key, sheet] of Object.entries(spriteLoader.spriteSheets)) {
+        textureLoader.load(
+            sheet.file,
+            (texture) => {
+                // Store the loaded texture
+                spriteLoader.textures[key] = texture;
+                
+                // Check if all textures are loaded
+                loadedTextures++;
+                if (loadedTextures === totalTextures) {
+                    if (callback) callback();
+                }
+            },
+            undefined, // onProgress not supported
+            (error) => {
+                console.error(`Error loading texture ${sheet.file}:`, error);
+            }
+        );
+    }
+}
+
+// Update sprite frame in animation
+function updateSpriteFrame(spriteMesh, spriteType, frameIndex) {
+    if (!spriteLoader.loaded || !spriteMesh || !spriteMesh.geometry) {
+        return;
+    }
+    
+    const sheet = spriteLoader.spriteSheets[spriteType];
+    const frameWidth = 1 / sheet.cols;
+    const frameHeight = 1 / sheet.rows;
+    
+    // Calculate frame position in the texture
+    const colIndex = frameIndex % sheet.cols;
+    const rowIndex = Math.floor(frameIndex / sheet.cols);
+    
+    const frameX = colIndex * frameWidth;
+    const frameY = rowIndex * frameHeight;
+    
+    // Update UV coordinates
+    const geo = spriteMesh.geometry;
+    
+    geo.faceVertexUvs[0][0][0].x = frameX;
+    geo.faceVertexUvs[0][0][0].y = 1 - frameY;
+    geo.faceVertexUvs[0][0][1].x = frameX;
+    geo.faceVertexUvs[0][0][1].y = 1 - (frameY + frameHeight);
+    geo.faceVertexUvs[0][0][2].x = frameX + frameWidth;
+    geo.faceVertexUvs[0][0][2].y = 1 - frameY;
+    
+    geo.faceVertexUvs[0][1][0].x = frameX;
+    geo.faceVertexUvs[0][1][0].y = 1 - (frameY + frameHeight);
+    geo.faceVertexUvs[0][1][1].x = frameX + frameWidth;
+    geo.faceVertexUvs[0][1][1].y = 1 - (frameY + frameHeight);
+    geo.faceVertexUvs[0][1][2].x = frameX + frameWidth;
+    geo.faceVertexUvs[0][1][2].y = 1 - frameY;
+    
+    geo.uvsNeedUpdate = true;
 }
 
 // --- Queen ---
 
 function createQueen(position) {
-    // Create the ant queen with a more distinctive appearance
+    // Check if the queen already exists
     if (queenMesh) return; // Only one queen for now
+    
+    // Wait until textures are loaded
+    if (!spriteLoader.loaded) {
+        console.log("Waiting for textures to load before creating queen...");
+        setTimeout(() => createQueen(position), 500); // Try again in 500ms
+        return;
+    }
 
-    // Create a group for the queen (body + head)
+    // Create a group for the queen
     queenMesh = new THREE.Group();
     queenMesh.name = "QUEEN";
     
-    // Body (elongated ellipsoid)
-    const bodyGeo = new THREE.SphereGeometry(0.5, 12, 12);
-    bodyGeo.scale(1, 0.6, 1.8); // Scale to make it ant-like
-    const bodyMat = new THREE.MeshStandardMaterial({ 
-        color: 0x333333,  // Dark gray/black
-        roughness: 0.7,
-        metalness: 0.2
+    // Create a plane for the sprite
+    const queenGeo = new THREE.PlaneGeometry(2.0, 2.0); // Larger than worker ants
+    const queenMat = new THREE.MeshBasicMaterial({
+        map: spriteLoader.textures.queen,
+        transparent: true,
+        alphaTest: 0.5
     });
-    const bodyMesh = new THREE.Mesh(bodyGeo, bodyMat);
-    queenMesh.add(bodyMesh);
     
-    // Head (smaller sphere, slightly offset)
-    const headGeo = new THREE.SphereGeometry(0.3, 10, 10);
-    const headMat = new THREE.MeshStandardMaterial({ 
-        color: 0x222222,  // Slightly darker than body
-        roughness: 0.6,
-        metalness: 0.3
-    });
-    const headMesh = new THREE.Mesh(headGeo, headMat);
-    headMesh.position.set(0, 0, 0.8); // Position at front of body
-    queenMesh.add(headMesh);
-
+    // Set up UV coordinates for the first frame in sprite sheet
+    const sheet = spriteLoader.spriteSheets.queen;
+    const frameWidth = 1 / sheet.cols;
+    const frameHeight = 1 / sheet.rows;
+    
+    // Use the first frame
+    queenGeo.faceVertexUvs[0][0][0].x = 0;
+    queenGeo.faceVertexUvs[0][0][0].y = 1;
+    queenGeo.faceVertexUvs[0][0][1].x = 0;
+    queenGeo.faceVertexUvs[0][0][1].y = 1 - frameHeight;
+    queenGeo.faceVertexUvs[0][0][2].x = frameWidth;
+    queenGeo.faceVertexUvs[0][0][2].y = 1;
+    
+    queenGeo.faceVertexUvs[0][1][0].x = 0;
+    queenGeo.faceVertexUvs[0][1][0].y = 1 - frameHeight;
+    queenGeo.faceVertexUvs[0][1][1].x = frameWidth;
+    queenGeo.faceVertexUvs[0][1][1].y = 1 - frameHeight;
+    queenGeo.faceVertexUvs[0][1][2].x = frameWidth;
+    queenGeo.faceVertexUvs[0][1][2].y = 1;
+    
+    queenGeo.uvsNeedUpdate = true;
+    
+    // Create the sprite mesh
+    const queenSpriteMesh = new THREE.Mesh(queenGeo, queenMat);
+    queenSpriteMesh.rotation.x = -Math.PI / 2; // Lay flat on ground
+    
+    // Add the sprite to the group
+    queenMesh.add(queenSpriteMesh);
+    
     // Position slightly above the ground intersection point
     queenMesh.position.copy(position);
-    queenMesh.position.y += 0.4; // Half the height of the box
-
-    queenMesh.name = "QUEEN"; // Add a name for easier identification later
+    queenMesh.position.y += 0.05; // Slightly above ground to prevent z-fighting
+    
+    // Add to scene
     scene.add(queenMesh);
 
     console.log("Queen placed at:", queenMesh.position);
@@ -171,7 +288,13 @@ function createQueen(position) {
         holeMesh.visible = true;
         console.log("Hole placed at:", holeMesh.position);
     }
-
+    
+    // Store animation details for the queen
+    queenMesh.userData = {
+        frameIndex: 0,
+        frameTime: 0,
+        frameDuration: 0.25 // 4 frames per second
+    };
 }
 
 // NEW: --- Underground ---
@@ -368,6 +491,157 @@ function onClick(event) {
     
         console.log(`Egg laid at [${queenGridX}, ${queenGridY}]. Total eggs: ${eggs.length}`);
     }
+
+    // --- Food System Functions ---
+    
+function createInitialFoodSources(count) {
+    if (!spriteLoader.loaded) {
+        console.error("Cannot create food sources: textures not loaded");
+        return;
+    }
+    
+    for (let i = 0; i < count; i++) {
+        // Random position on surface
+        const angle = Math.random() * Math.PI * 2;
+        const distance = Math.random() * FOOD_SPAWN_RADIUS;
+        const x = Math.cos(angle) * distance;
+        const z = Math.sin(angle) * distance;
+        
+        createFoodSource(new THREE.Vector3(x, 0.01, z));
+    }
+    
+    console.log(`Created ${count} initial food sources`);
+}
+
+function createFoodSource(position) {
+    // Create a plane for the sprite
+    const foodGeo = new THREE.PlaneGeometry(1.5, 1.5);
+    const foodMat = new THREE.MeshBasicMaterial({
+        map: spriteLoader.textures.seedling,
+        transparent: true,
+        alphaTest: 0.5
+    });
+    
+    // Set up UV coordinates for the first frame in sprite sheet
+    const sheet = spriteLoader.spriteSheets.seedling;
+    const frameWidth = 1 / sheet.cols;
+    const frameHeight = 1 / sheet.rows;
+    
+    // Use the first frame (growth stage 0)
+    foodGeo.faceVertexUvs[0][0][0].x = 0;
+    foodGeo.faceVertexUvs[0][0][0].y = 1;
+    foodGeo.faceVertexUvs[0][0][1].x = 0;
+    foodGeo.faceVertexUvs[0][0][1].y = 1 - frameHeight;
+    foodGeo.faceVertexUvs[0][0][2].x = frameWidth;
+    foodGeo.faceVertexUvs[0][0][2].y = 1;
+    
+    foodGeo.faceVertexUvs[0][1][0].x = 0;
+    foodGeo.faceVertexUvs[0][1][0].y = 1 - frameHeight;
+    foodGeo.faceVertexUvs[0][1][1].x = frameWidth;
+    foodGeo.faceVertexUvs[0][1][1].y = 1 - frameHeight;
+    foodGeo.faceVertexUvs[0][1][2].x = frameWidth;
+    foodGeo.faceVertexUvs[0][1][2].y = 1;
+    
+    foodGeo.uvsNeedUpdate = true;
+    
+    // Create the mesh
+    const foodMesh = new THREE.Mesh(foodGeo, foodMat);
+    foodMesh.position.copy(position);
+    foodMesh.rotation.x = -Math.PI / 2; // Lay flat on ground
+    foodMesh.rotation.z = Math.random() * Math.PI * 2; // Random rotation
+    
+    // Add to the scene (only visible on surface)
+    scene.add(foodMesh);
+    
+    // Store food data
+    const foodData = {
+        mesh: foodMesh,
+        position: position.clone(),
+        growthStage: 0,
+        growthProgress: 0,
+        amount: FOOD_INITIAL_AMOUNT,
+        active: true
+    };
+    
+    foodSources.push(foodData);
+    console.log(`Food source created at ${position.x.toFixed(2)}, ${position.z.toFixed(2)}`);
+    
+    return foodData;
+}
+
+function updateFoodSource(food, deltaTime) {
+    if (!food.active) return;
+    
+    // Update growth
+    if (food.growthStage < FOOD_GROWTH_STAGES - 1) {
+        food.growthProgress += deltaTime / FOOD_GROWTH_TIME;
+        
+        if (food.growthProgress >= 1.0) {
+            // Advance to next growth stage
+            food.growthStage++;
+            food.growthProgress = 0;
+            
+            // Update the sprite frame
+            updateFoodSourceFrame(food);
+            
+            console.log(`Food source advanced to growth stage ${food.growthStage}`);
+        }
+    }
+}
+
+function updateFoodSourceFrame(food) {
+    if (!food.mesh || !food.mesh.geometry) return;
+    
+    const sheet = spriteLoader.spriteSheets.seedling;
+    const frameWidth = 1 / sheet.cols;
+    const frameHeight = 1 / sheet.rows;
+    
+    // Calculate frame X position in the texture (growth stage determines the frame)
+    const frameX = (food.growthStage % sheet.cols) * frameWidth;
+    const frameY = Math.floor(food.growthStage / sheet.cols) * frameHeight;
+    
+    // Update UV coordinates for sprite
+    const geo = food.mesh.geometry;
+    
+    geo.faceVertexUvs[0][0][0].x = frameX;
+    geo.faceVertexUvs[0][0][0].y = 1 - frameY;
+    geo.faceVertexUvs[0][0][1].x = frameX;
+    geo.faceVertexUvs[0][0][1].y = 1 - (frameY + frameHeight);
+    geo.faceVertexUvs[0][0][2].x = frameX + frameWidth;
+    geo.faceVertexUvs[0][0][2].y = 1 - frameY;
+    
+    geo.faceVertexUvs[0][1][0].x = frameX;
+    geo.faceVertexUvs[0][1][0].y = 1 - (frameY + frameHeight);
+    geo.faceVertexUvs[0][1][1].x = frameX + frameWidth;
+    geo.faceVertexUvs[0][1][1].y = 1 - (frameY + frameHeight);
+    geo.faceVertexUvs[0][1][2].x = frameX + frameWidth;
+    geo.faceVertexUvs[0][1][2].y = 1 - frameY;
+    
+    geo.uvsNeedUpdate = true;
+}
+
+function harvestFood(food, amount) {
+    if (!food.active || food.amount <= 0) return 0;
+    
+    // Only fully grown plants can be harvested
+    if (food.growthStage < FOOD_GROWTH_STAGES - 1) {
+        return 0;
+    }
+    
+    // Calculate how much food to take (limited by what's available)
+    const harvestedAmount = Math.min(amount, food.amount);
+    food.amount -= harvestedAmount;
+    
+    // If the food source is depleted, mark it as inactive and remove it
+    if (food.amount <= 0) {
+        food.active = false;
+        scene.remove(food.mesh);
+        console.log("Food source depleted");
+    }
+    
+    console.log(`Harvested ${harvestedAmount} food. Remaining: ${food.amount}`);
+    return harvestedAmount;
+}
 
     // --- Digging Functions ---
 
@@ -589,35 +863,71 @@ function getStrongestPheromoneDirection(gridX, gridY, type) {
     // --- Worker Ant Functions ---
 
 function createWorkerAnt(position) {
-    // Create worker ant mesh
+    // Ensure textures are loaded
+    if (!spriteLoader.loaded) {
+        console.log("Waiting for textures to load before creating worker...");
+        setTimeout(() => {
+            const worker = createWorkerAnt(position);
+            // If this was from egg hatching, we need to complete that process
+            if (typeof eggData !== 'undefined' && typeof index !== 'undefined') {
+                eggs.splice(index, 1);
+            }
+        }, 500);
+        return null;
+    }
+    
+    // Create worker ant group
     const workerGroup = new THREE.Group();
     workerGroup.name = "WORKER";
     
-    // Body (small sphere)
-    const bodyGeo = new THREE.SphereGeometry(0.2, 8, 8);
-    bodyGeo.scale(1, 0.6, 1.4); // Scale to make it ant-like but smaller than queen
-    const bodyMat = new THREE.MeshStandardMaterial({ 
-        color: 0x555555,  // Medium gray
-        roughness: 0.7,
-        metalness: 0.2
+    // Create a plane for the sprite
+    const workerGeo = new THREE.PlaneGeometry(1.2, 0.9); // Smaller than queen
+    const workerMat = new THREE.MeshBasicMaterial({
+        map: spriteLoader.textures.ant,
+        transparent: true,
+        alphaTest: 0.5
     });
-    const bodyMesh = new THREE.Mesh(bodyGeo, bodyMat);
-    workerGroup.add(bodyMesh);
     
-    // Head (smaller sphere, slightly offset)
-    const headGeo = new THREE.SphereGeometry(0.15, 8, 8);
-    const headMat = new THREE.MeshStandardMaterial({ 
-        color: 0x444444,  // Slightly darker than body
-        roughness: 0.6,
-        metalness: 0.3
-    });
-    const headMesh = new THREE.Mesh(headGeo, headMat);
-    headMesh.position.set(0, 0, 0.3); // Position at front of body
-    workerGroup.add(headMesh);
+    // Set up UV coordinates for the first frame in sprite sheet
+    const sheet = spriteLoader.spriteSheets.ant;
+    const frameWidth = 1 / sheet.cols;
+    const frameHeight = 1 / sheet.rows;
+    
+    // Use the first frame
+    workerGeo.faceVertexUvs[0][0][0].x = 0;
+    workerGeo.faceVertexUvs[0][0][0].y = 1;
+    workerGeo.faceVertexUvs[0][0][1].x = 0;
+    workerGeo.faceVertexUvs[0][0][1].y = 1 - frameHeight;
+    workerGeo.faceVertexUvs[0][0][2].x = frameWidth;
+    workerGeo.faceVertexUvs[0][0][2].y = 1;
+    
+    workerGeo.faceVertexUvs[0][1][0].x = 0;
+    workerGeo.faceVertexUvs[0][1][0].y = 1 - frameHeight;
+    workerGeo.faceVertexUvs[0][1][1].x = frameWidth;
+    workerGeo.faceVertexUvs[0][1][1].y = 1 - frameHeight;
+    workerGeo.faceVertexUvs[0][1][2].x = frameWidth;
+    workerGeo.faceVertexUvs[0][1][2].y = 1;
+    
+    workerGeo.uvsNeedUpdate = true;
+    
+    // Create the sprite mesh
+    const workerSpriteMesh = new THREE.Mesh(workerGeo, workerMat);
+    workerSpriteMesh.rotation.x = -Math.PI / 2; // Lay flat
+    
+    // Add the sprite to the group
+    workerGroup.add(workerSpriteMesh);
     
     // Position at the given location
     workerGroup.position.copy(position);
-    workerGroup.position.z = 0.2; // Slightly above ground
+    workerGroup.position.z = 0.05; // Slightly above ground to prevent z-fighting
+    
+    // Store animation details
+    workerGroup.userData = {
+        frameIndex: 0,
+        frameTime: 0,
+        frameDuration: 0.2, // 5 frames per second
+        originalMaterial: workerMat.clone() // Store original material for resetting after digging
+    };
     
     // Add to scene/group
     undergroundGroup.add(workerGroup);
@@ -633,7 +943,10 @@ function createWorkerAnt(position) {
         pheromoneCooldown: 1.0 + Math.random() * 0.5, // Random cooldown between 1-1.5 seconds
         diggingProgress: 0, // Progress for digging (0-1)
         diggingSpeed: 0.5 + Math.random() * 0.3, // Random digging speed
-        diggingTarget: null // Target soil voxel for digging
+        diggingTarget: null, // Target soil voxel for digging
+        foodAmount: 0, // How much food the worker is carrying
+        targetFoodSource: null, // Reference to targeted food source when foraging
+        forageTimer: 0 // Timer for foraging actions
     };
     
     workers.push(workerData);
@@ -736,6 +1049,18 @@ function hatchEgg(eggData, index) {
                             }
                         }
                         console.log(`Commanded ${diggingStarted} of ${nearbyWorkers.length} nearby workers to start digging`);
+                        break;
+                        
+                    case 'f': // Spawn a new food source near mouse position
+                        if (currentView === 'surface') {
+                            // Use the raycaster to find where the mouse is pointing on the ground
+                            raycaster.setFromCamera(mouse, activeCamera);
+                            const intersects = raycaster.intersectObject(groundPlane);
+                            if (intersects.length > 0) {
+                                createFoodSource(intersects[0].point);
+                                console.log("Manual food source created at mouse position");
+                            }
+                        }
                         break;
                 }
             }
@@ -841,6 +1166,37 @@ function animate() {
         }
     }
     
+    // 3. Food Source Spawning and Growth
+    // Only spawn and grow food on the surface
+    timeSinceLastFoodSpawn += deltaTime;
+    if (timeSinceLastFoodSpawn >= FOOD_SPAWN_INTERVAL) {
+        if (foodSources.filter(f => f.active).length < 10) { // Limit total active food sources
+            // Random position on surface
+            const angle = Math.random() * Math.PI * 2;
+            const distance = FOOD_SPAWN_RADIUS * 0.3 + Math.random() * FOOD_SPAWN_RADIUS * 0.7;
+            const x = Math.cos(angle) * distance;
+            const z = Math.sin(angle) * distance;
+            
+            createFoodSource(new THREE.Vector3(x, 0.01, z));
+        }
+        timeSinceLastFoodSpawn = 0;
+    }
+    
+    // Update all food sources (growth stages)
+    for (let i = foodSources.length - 1; i >= 0; i--) {
+        const food = foodSources[i];
+        updateFoodSource(food, deltaTime);
+        
+        // Clean up depleted food sources
+        if (!food.active && food.mesh) {
+            scene.remove(food.mesh);
+            food.mesh = null;
+            
+            // Remove from array (optional)
+            // foodSources.splice(i, 1);
+        }
+    }
+    
     // 3. Pheromone Decay
     for (let i = pheromones.length - 1; i >= 0; i--) {
         const pheromone = pheromones[i];
@@ -864,9 +1220,36 @@ function animate() {
         }
     }
     
-    // 4. Worker Ant Behavior
+    // 4. Sprite Animations
+    // Update queen animation if exists and visible
+    if (queenMesh && queenMesh.visible && queenMesh.userData) {
+        queenMesh.userData.frameTime += deltaTime;
+        if (queenMesh.userData.frameTime >= queenMesh.userData.frameDuration) {
+            // Advance to next frame
+            queenMesh.userData.frameTime = 0;
+            queenMesh.userData.frameIndex = (queenMesh.userData.frameIndex + 1) % spriteLoader.spriteSheets.queen.frames;
+            
+            // Update the sprite frame
+            updateSpriteFrame(queenMesh.children[0], 'queen', queenMesh.userData.frameIndex);
+        }
+    }
+    
+    // 5. Worker Ant Behavior
     for (let i = 0; i < workers.length; i++) {
         const worker = workers[i];
+        
+        // Update worker animation
+        if (worker.mesh && worker.mesh.userData) {
+            worker.mesh.userData.frameTime += deltaTime;
+            if (worker.mesh.userData.frameTime >= worker.mesh.userData.frameDuration) {
+                // Advance to next frame
+                worker.mesh.userData.frameTime = 0;
+                worker.mesh.userData.frameIndex = (worker.mesh.userData.frameIndex + 1) % spriteLoader.spriteSheets.ant.frames;
+                
+                // Update the sprite frame
+                updateSpriteFrame(worker.mesh.children[0], 'ant', worker.mesh.userData.frameIndex);
+            }
+        }
         
         // Update pheromone laying cooldown
         worker.timeSinceLastPheromone += deltaTime;
@@ -1002,8 +1385,11 @@ window.queenGridY = queenGridY;
 window.eggs = eggs;
 window.workers = workers;
 window.pheromones = pheromones;
+window.foodSources = foodSources;
 window.PHEROMONE_TYPES = PHEROMONE_TYPES;
 window.createPheromone = createPheromone;
+window.createFoodSource = createFoodSource;
+window.harvestFood = harvestFood;
 window.findAdjacentSoil = findAdjacentSoil;
 window.startDigging = startDigging;
 window.voxelGrid = voxelGrid;
