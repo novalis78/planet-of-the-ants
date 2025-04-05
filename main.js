@@ -369,6 +369,131 @@ function onClick(event) {
         console.log(`Egg laid at [${queenGridX}, ${queenGridY}]. Total eggs: ${eggs.length}`);
     }
 
+    // --- Digging Functions ---
+
+function findAdjacentSoil(gridX, gridY) {
+    // Check the four adjacent cells (up, down, left, right) for soil
+    const directions = [
+        { dx: 0, dy: -1, name: 'up' },    // Up
+        { dx: 0, dy: 1, name: 'down' },   // Down
+        { dx: -1, dy: 0, name: 'left' },  // Left
+        { dx: 1, dy: 0, name: 'right' }   // Right
+    ];
+    
+    // Shuffle directions for more natural-looking behavior
+    for (let i = directions.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [directions[i], directions[j]] = [directions[j], directions[i]];
+    }
+    
+    // Check each direction
+    for (const dir of directions) {
+        const targetX = gridX + dir.dx;
+        const targetY = gridY + dir.dy;
+        
+        // Check bounds
+        if (targetX < 0 || targetX >= undergroundWidth || targetY < 0 || targetY >= undergroundHeight) {
+            continue; // Skip out of bounds
+        }
+        
+        // Check if soil exists here
+        if (voxelGrid[targetY] && voxelGrid[targetY][targetX]) {
+            return {
+                x: targetX,
+                y: targetY,
+                direction: dir.name,
+                voxel: voxelGrid[targetY][targetX]
+            };
+        }
+    }
+    
+    // No soil found
+    return null;
+}
+
+function startDigging(worker, targetSoil) {
+    if (worker.state === 'digging') {
+        return false; // Already digging
+    }
+    
+    // Set the worker's state to digging
+    worker.state = 'digging';
+    worker.diggingTarget = targetSoil;
+    worker.diggingProgress = 0;
+    
+    // Change worker's color to indicate digging state
+    const bodyMesh = worker.mesh.children[0]; // First child is body
+    if (bodyMesh && bodyMesh.material) {
+        // Store original color for resetting later
+        worker.originalBodyColor = bodyMesh.material.color.getHex();
+        bodyMesh.material.color.set(0x8B4513); // Brown while digging
+    }
+    
+    // Position worker facing the soil
+    switch(targetSoil.direction) {
+        case 'up':
+            worker.mesh.rotation.z = Math.PI / 2; // Rotate to face up
+            break;
+        case 'down':
+            worker.mesh.rotation.z = -Math.PI / 2; // Rotate to face down
+            break;
+        case 'left':
+            worker.mesh.rotation.y = Math.PI; // Rotate to face left
+            break;
+        case 'right':
+            worker.mesh.rotation.y = 0; // Rotate to face right
+            break;
+    }
+    
+    console.log(`Worker at [${worker.gridX}, ${worker.gridY}] started digging ${targetSoil.direction} to [${targetSoil.x}, ${targetSoil.y}]`);
+    return true;
+}
+
+function completeDigging(worker) {
+    if (!worker.diggingTarget) {
+        return false; // No digging target
+    }
+    
+    // Get the target voxel
+    const targetX = worker.diggingTarget.x;
+    const targetY = worker.diggingTarget.y;
+    const voxelMesh = voxelGrid[targetY][targetX];
+    
+    if (!voxelMesh) {
+        // Target already dug by another worker
+        worker.state = 'idle';
+        worker.diggingTarget = null;
+        worker.diggingProgress = 0;
+        return false;
+    }
+    
+    // Remove the soil voxel
+    undergroundGroup.remove(voxelMesh);
+    voxelGrid[targetY][targetX] = null; // Mark as empty in grid
+    
+    // Create a HOME pheromone at the newly dug area
+    const pheromonePos = new THREE.Vector3(
+        (targetX * voxelSize) + undergroundGroup.position.x,
+        (-targetY * voxelSize) + undergroundGroup.position.y,
+        0.01
+    );
+    createPheromone(pheromonePos, 'HOME', 0.8);
+    
+    // Reset worker state
+    worker.state = 'idle';
+    worker.diggingTarget = null;
+    worker.diggingProgress = 0;
+    
+    // Reset worker appearance
+    const bodyMesh = worker.mesh.children[0];
+    if (bodyMesh && bodyMesh.material && worker.originalBodyColor) {
+        bodyMesh.material.color.set(worker.originalBodyColor);
+    }
+    
+    console.log(`Worker at [${worker.gridX}, ${worker.gridY}] completed digging to [${targetX}, ${targetY}]`);
+    return true;
+}
+
     // --- Pheromone System Functions ---
     
 function createPheromone(position, type, initialStrength = 1.0) {
@@ -505,7 +630,10 @@ function createWorkerAnt(position) {
         state: 'idle', // Initial state: idle, carrying, digging, etc.
         target: null,
         timeSinceLastPheromone: 0, // Timer for laying pheromones
-        pheromoneCooldown: 1.0 + Math.random() * 0.5 // Random cooldown between 1-1.5 seconds
+        pheromoneCooldown: 1.0 + Math.random() * 0.5, // Random cooldown between 1-1.5 seconds
+        diggingProgress: 0, // Progress for digging (0-1)
+        diggingSpeed: 0.5 + Math.random() * 0.3, // Random digging speed
+        diggingTarget: null // Target soil voxel for digging
     };
     
     workers.push(workerData);
@@ -567,7 +695,7 @@ function hatchEgg(eggData, index) {
             }
         }
         
-        // Debug keys for pheromones
+        // Debug keys for pheromones and digging
         if (currentView === 'underground') {
             // Use number keys to place different pheromone types at the queen's position
             if (queenMesh && queenMesh.visible) {
@@ -585,6 +713,29 @@ function hatchEgg(eggData, index) {
                     case '3': // DANGER pheromone
                         createPheromone(queenPos, 'DANGER', 1.0);
                         console.log("Manual DANGER pheromone placed at queen");
+                        break;
+                    case 'd': // Manual digging command for all nearby workers
+                        // Find workers near the queen and command them to dig
+                        const nearbyWorkers = workers.filter(worker => {
+                            // Calculate distance to queen
+                            const distance = Math.sqrt(
+                                Math.pow(worker.gridX - queenGridX, 2) + 
+                                Math.pow(worker.gridY - queenGridY, 2)
+                            );
+                            // Only workers within 3 grid cells of the queen and who are idle
+                            return distance <= 3 && worker.state === 'idle';
+                        });
+                        
+                        // Command each worker to dig if possible
+                        let diggingStarted = 0;
+                        for (const worker of nearbyWorkers) {
+                            const adjacentSoil = findAdjacentSoil(worker.gridX, worker.gridY);
+                            if (adjacentSoil) {
+                                startDigging(worker, adjacentSoil);
+                                diggingStarted++;
+                            }
+                        }
+                        console.log(`Commanded ${diggingStarted} of ${nearbyWorkers.length} nearby workers to start digging`);
                         break;
                 }
             }
@@ -720,8 +871,23 @@ function animate() {
         // Update pheromone laying cooldown
         worker.timeSinceLastPheromone += deltaTime;
         
-        // Worker states
-        if (worker.state === 'idle') {
+        // Handle different worker states
+        if (worker.state === 'digging') {
+            // Update digging progress
+            worker.diggingProgress += worker.diggingSpeed * deltaTime;
+            
+            // Visual feedback - slight bobbing motion while digging
+            if (worker.mesh) {
+                const bobAmount = Math.sin(Date.now() * 0.01) * 0.05;
+                worker.mesh.position.z = 0.2 + bobAmount;
+            }
+            
+            // Check if digging is complete
+            if (worker.diggingProgress >= 1.0) {
+                completeDigging(worker);
+            }
+        }
+        else if (worker.state === 'idle') {
             // Lay HOME pheromone if enough time has passed
             if (worker.timeSinceLastPheromone >= worker.pheromoneCooldown) {
                 // Create position vector
@@ -738,6 +904,16 @@ function animate() {
                 }
             }
             
+            // Check for digging opportunities (25% chance per worker per second)
+            if (Math.random() < 0.25 * deltaTime) {
+                const adjacentSoil = findAdjacentSoil(worker.gridX, worker.gridY);
+                if (adjacentSoil) {
+                    // Start digging
+                    startDigging(worker, adjacentSoil);
+                    continue; // Skip movement this frame
+                }
+            }
+            
             // Decide how to move - 70% chance to follow pheromones if any, otherwise random movement
             let movementDirection = null;
             
@@ -746,7 +922,12 @@ function animate() {
                 // First try FOOD pheromones (higher priority)
                 movementDirection = getStrongestPheromoneDirection(worker.gridX, worker.gridY, 'FOOD');
                 
-                // If no FOOD pheromones, check DANGER and avoid them
+                // If no FOOD pheromones, try HOME pheromones with lower probability (ants shouldn't always go home)
+                if (!movementDirection && Math.random() < 0.3) {
+                    movementDirection = getStrongestPheromoneDirection(worker.gridX, worker.gridY, 'HOME');
+                }
+                
+                // If no HOME pheromones, check DANGER and avoid them
                 if (!movementDirection && Math.random() < 0.8) {
                     const dangerDirection = getStrongestPheromoneDirection(worker.gridX, worker.gridY, 'DANGER');
                     if (dangerDirection) {
@@ -790,6 +971,9 @@ function animate() {
                     const visualX = (targetX * voxelSize) + undergroundGroup.position.x;
                     const visualY = (-targetY * voxelSize) + undergroundGroup.position.y;
                     
+                    // Reset rotation to normal
+                    worker.mesh.rotation.z = 0;
+                    
                     // Simple lerp for smooth movement could be added here
                     worker.mesh.position.set(visualX, visualY, worker.mesh.position.z);
                     
@@ -820,6 +1004,9 @@ window.workers = workers;
 window.pheromones = pheromones;
 window.PHEROMONE_TYPES = PHEROMONE_TYPES;
 window.createPheromone = createPheromone;
+window.findAdjacentSoil = findAdjacentSoil;
+window.startDigging = startDigging;
+window.voxelGrid = voxelGrid;
 window.undergroundWidth = undergroundWidth;
 window.undergroundHeight = undergroundHeight;
 window.scene = scene;
