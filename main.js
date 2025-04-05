@@ -15,6 +15,10 @@ const EGG_HATCH_TIME = 10.0; // Seconds for an egg to hatch
 let timeSinceLastEgg = 0;
 let eggGeometry, eggMaterial; // Shared resources for efficiency
 
+// Worker ant variables (global declaration)
+let workers = []; // Array to store worker ant data
+const WORKER_SPEED = 0.5; // Movement speed of worker ants
+
 // NEW: Underground representation
 const undergroundWidth = 20; // How many voxels wide (X axis)
 const undergroundHeight = 10; // How many voxels high (Y axis)
@@ -356,23 +360,78 @@ function onClick(event) {
         console.log(`Egg laid at [${queenGridX}, ${queenGridY}]. Total eggs: ${eggs.length}`);
     }
 
-    function hatchEgg(eggData, index) {
-        console.log("Egg hatching!");
+    // Worker ant creation function
+
+function createWorkerAnt(position) {
+    // Create worker ant mesh
+    const workerGroup = new THREE.Group();
+    workerGroup.name = "WORKER";
     
-        // 1. Remove visual mesh
-        undergroundGroup.remove(eggData.mesh);
-        // Optional cleanup
-        // eggData.mesh.geometry.dispose(); // Don't dispose shared geometry!
-        // eggData.mesh.material.dispose(); // Don't dispose shared material!
+    // Body (small sphere)
+    const bodyGeo = new THREE.SphereGeometry(0.2, 8, 8);
+    bodyGeo.scale(1, 0.6, 1.4); // Scale to make it ant-like but smaller than queen
+    const bodyMat = new THREE.MeshStandardMaterial({ 
+        color: 0x555555,  // Medium gray
+        roughness: 0.7,
+        metalness: 0.2
+    });
+    const bodyMesh = new THREE.Mesh(bodyGeo, bodyMat);
+    workerGroup.add(bodyMesh);
     
-        // 2. Remove from our tracking array
-        // Splice is safe here if we iterate backwards or adjust index after removal
-        eggs.splice(index, 1);
+    // Head (smaller sphere, slightly offset)
+    const headGeo = new THREE.SphereGeometry(0.15, 8, 8);
+    const headMat = new THREE.MeshStandardMaterial({ 
+        color: 0x444444,  // Slightly darker than body
+        roughness: 0.6,
+        metalness: 0.3
+    });
+    const headMesh = new THREE.Mesh(headGeo, headMat);
+    headMesh.position.set(0, 0, 0.3); // Position at front of body
+    workerGroup.add(headMesh);
     
-        // TODO: Spawn a worker ant here!
-        console.log(`Hatched. Remaining eggs: ${eggs.length}`);
+    // Position at the given location
+    workerGroup.position.copy(position);
+    workerGroup.position.z = 0.2; // Slightly above ground
     
-    }
+    // Add to scene/group
+    undergroundGroup.add(workerGroup);
+    
+    // Store worker data
+    const workerData = {
+        mesh: workerGroup,
+        gridX: Math.round(position.x / voxelSize),
+        gridY: Math.round(-position.y / voxelSize), // Convert Y to grid coordinate
+        state: 'idle', // Initial state: idle, carrying, digging, etc.
+        target: null
+    };
+    
+    workers.push(workerData);
+    console.log(`Worker ant created at [${workerData.gridX}, ${workerData.gridY}]. Total workers: ${workers.length}`);
+    
+    return workerData;
+}
+
+function hatchEgg(eggData, index) {
+    console.log("Egg hatching!");
+    
+    // 1. Get position before removing egg
+    const eggPosition = eggData.mesh.position.clone();
+    
+    // 2. Remove visual egg mesh
+    undergroundGroup.remove(eggData.mesh);
+    // Optional cleanup
+    // eggData.mesh.geometry.dispose(); // Don't dispose shared geometry!
+    // eggData.mesh.material.dispose(); // Don't dispose shared material!
+    
+    // 3. Remove from our tracking array
+    // Splice is safe here if we iterate backwards or adjust index after removal
+    eggs.splice(index, 1);
+    
+    // 4. Spawn a worker ant at the egg's position
+    const worker = createWorkerAnt(eggPosition);
+    
+    console.log(`Egg hatched into worker ant. Remaining eggs: ${eggs.length}`);
+}
 
 
     function onKeyDown(event) {
@@ -504,6 +563,52 @@ function animate() {
             // But because we iterate backwards, this is fine.
         }
     }
+    
+    // 3. Worker Ant Behavior
+    for (let i = 0; i < workers.length; i++) {
+        const worker = workers[i];
+        
+        // Simple random movement for now
+        if (worker.state === 'idle') {
+            // 10% chance per second to move in a random direction
+            if (Math.random() < 0.1 * deltaTime) {
+                // Pick a random direction
+                const directions = [
+                    { dx: 1, dy: 0 },  // Right
+                    { dx: -1, dy: 0 }, // Left
+                    { dx: 0, dy: 1 },  // Down
+                    { dx: 0, dy: -1 }  // Up
+                ];
+                
+                const randomDir = directions[Math.floor(Math.random() * directions.length)];
+                const targetX = worker.gridX + randomDir.dx;
+                const targetY = worker.gridY + randomDir.dy;
+                
+                // Check if move is valid (within bounds and not into soil)
+                if (targetX >= 0 && targetX < undergroundWidth && 
+                    targetY >= 0 && targetY < undergroundHeight &&
+                    (!voxelGrid[targetY] || voxelGrid[targetY][targetX] === null)) {
+                    
+                    // Update grid position
+                    worker.gridX = targetX;
+                    worker.gridY = targetY;
+                    
+                    // Update visual position
+                    const visualX = (targetX * voxelSize) + undergroundGroup.position.x;
+                    const visualY = (-targetY * voxelSize) + undergroundGroup.position.y;
+                    
+                    // Simple lerp for smooth movement could be added here
+                    worker.mesh.position.set(visualX, visualY, worker.mesh.position.z);
+                    
+                    // Update orientation based on movement direction
+                    if (randomDir.dx !== 0) {
+                        // Moving horizontally, rotate to face direction
+                        worker.mesh.rotation.y = randomDir.dx > 0 ? 0 : Math.PI;
+                    }
+                }
+            }
+        }
+    }
 
     // Render the scene using the ACTIVE camera
     renderer.render(scene, activeCamera);
@@ -518,6 +623,7 @@ window.queenMesh = queenMesh;
 window.queenGridX = queenGridX;
 window.queenGridY = queenGridY;
 window.eggs = eggs;
+window.workers = workers;
 window.undergroundWidth = undergroundWidth;
 window.undergroundHeight = undergroundHeight;
 window.scene = scene;
