@@ -14,15 +14,23 @@ let spriteLoader = {
     spriteSheets: {
         ant: { file: 'sprite_sheet_ant.png', rows: 3, cols: 2, frames: 6 },
         queen: { file: 'sprite_sheet_queen.png', rows: 3, cols: 2, frames: 6 },
-        seedling: { file: 'sprite_sheet_seedling.png', rows: 1, cols: 4, frames: 4 }
+        seedling: { file: 'sprite_sheet_seedling.png', rows: 1, cols: 4, frames: 4 },
+        pupae: { file: 'sprite_sheet_pupae.png', rows: 4, cols: 3, frames: 12 },
+        food: { file: 'sprite_sheet_food.png', rows: 4, cols: 3, frames: 12 },
+        spider: { file: 'sprite_sheet_spider.png', rows: 3, cols: 3, frames: 9 },
+        beetle: { file: 'sprite_sheet_beetle.png', rows: 3, cols: 3, frames: 9 }
     },
     loaded: false
 };
 
-// NEW: Egg variables
+// Ant lifecycle variables
 let eggs = []; // Array to store egg data { mesh: eggMesh, hatchTimer: time }
+let larvae = []; // Array to store larvae data (between egg and pupae)
+let pupae = []; // Array to store pupae data (final stage before worker)
 const EGG_LAY_INTERVAL = 5.0; // Seconds between laying eggs
-const EGG_HATCH_TIME = 10.0; // Seconds for an egg to hatch
+const EGG_HATCH_TIME = 10.0; // Seconds for egg to become larva
+const LARVA_PUPATION_TIME = 15.0; // Seconds for larva to become pupa
+const PUPA_HATCH_TIME = 15.0; // Seconds for pupa to become adult
 let timeSinceLastEgg = 0;
 let eggGeometry, eggMaterial; // Shared resources for efficiency
 
@@ -41,13 +49,31 @@ const PHEROMONE_INFLUENCE_RADIUS = 1.5; // How far ants can detect pheromones
 
 // Food system
 let foodSources = []; // Array to store food sources
-const FOOD_GROWTH_STAGES = 4; // Number of growth stages for plants (seedling sprite)
+const FOOD_TYPES = {
+    SEEDLING: { value: 50, frames: 4, frameStart: 0, sheet: 'seedling' },
+    LEAF: { value: 30, frames: 3, frameStart: 0, sheet: 'food' },
+    SEED: { value: 20, frames: 4, frameStart: 3, sheet: 'food' },
+    INSECT: { value: 80, frames: 3, frameStart: 6, sheet: 'food' },
+    DECAYED_LEAF: { value: 15, frames: 2, frameStart: 9, sheet: 'food' }
+};
+const FOOD_GROWTH_STAGES = 4; // Number of growth stages for plants
 const FOOD_GROWTH_TIME = 30.0; // Time to grow to next stage
 const FOOD_SPAWN_INTERVAL = 15.0; // Seconds between spawning new food (on surface)
 const FOOD_SPAWN_RADIUS = 15.0; // Max distance from center to spawn food
 const FOOD_INITIAL_AMOUNT = 50; // Initial food amount per source
 const FOOD_CARRY_CAPACITY = 5; // How much food a worker can carry
 let timeSinceLastFoodSpawn = 0;
+let colonyFoodReserve = 0; // Total food stored in the colony
+
+// Predator system
+let predators = []; // Array to store predators (spiders, beetles)
+const PREDATOR_TYPES = {
+    SPIDER: { damage: 2, speed: 0.7, health: 10, sheet: 'spider' },
+    BEETLE: { damage: 1, speed: 0.4, health: 15, sheet: 'beetle' }
+};
+const PREDATOR_SPAWN_INTERVAL = 60.0; // Seconds between spawning predators
+const PREDATOR_SPAWN_RADIUS = 20.0; // Max distance from center to spawn predators
+let timeSinceLastPredatorSpawn = 0;
 
 // NEW: Underground representation
 const undergroundWidth = 20; // How many voxels wide (X axis)
@@ -492,6 +518,145 @@ function onClick(event) {
         console.log(`Egg laid at [${queenGridX}, ${queenGridY}]. Total eggs: ${eggs.length}`);
     }
 
+    // --- Predator System Functions ---
+    
+function createPredator(position, predatorType) {
+    // If no predator type specified, randomly pick one
+    if (!predatorType) {
+        predatorType = Math.random() < 0.7 ? 'SPIDER' : 'BEETLE';
+    }
+    
+    // Get predator configuration
+    const predatorConfig = PREDATOR_TYPES[predatorType];
+    if (!predatorConfig) {
+        console.error(`Invalid predator type: ${predatorType}`);
+        return null;
+    }
+    
+    // Make sure textures are loaded
+    if (!spriteLoader.loaded) {
+        console.log("Waiting for textures to load before creating predator...");
+        setTimeout(() => createPredator(position, predatorType), 500);
+        return null;
+    }
+    
+    // Create a plane for the sprite
+    const predGeo = new THREE.PlaneGeometry(2.0, 1.5);
+    const predMat = new THREE.MeshBasicMaterial({
+        map: spriteLoader.textures[predatorConfig.sheet],
+        transparent: true,
+        alphaTest: 0.5
+    });
+    
+    // Set up UV coordinates for the first frame in sprite sheet
+    const sheet = spriteLoader.spriteSheets[predatorConfig.sheet];
+    const frameWidth = 1 / sheet.cols;
+    const frameHeight = 1 / sheet.rows;
+    
+    // Use the first frame
+    predGeo.faceVertexUvs[0][0][0].x = 0;
+    predGeo.faceVertexUvs[0][0][0].y = 1;
+    predGeo.faceVertexUvs[0][0][1].x = 0;
+    predGeo.faceVertexUvs[0][0][1].y = 1 - frameHeight;
+    predGeo.faceVertexUvs[0][0][2].x = frameWidth;
+    predGeo.faceVertexUvs[0][0][2].y = 1;
+    
+    predGeo.faceVertexUvs[0][1][0].x = 0;
+    predGeo.faceVertexUvs[0][1][0].y = 1 - frameHeight;
+    predGeo.faceVertexUvs[0][1][1].x = frameWidth;
+    predGeo.faceVertexUvs[0][1][1].y = 1 - frameHeight;
+    predGeo.faceVertexUvs[0][1][2].x = frameWidth;
+    predGeo.faceVertexUvs[0][1][2].y = 1;
+    
+    predGeo.uvsNeedUpdate = true;
+    
+    // Create the mesh
+    const predMesh = new THREE.Mesh(predGeo, predMat);
+    predMesh.position.copy(position);
+    predMesh.rotation.x = -Math.PI / 2; // Lay flat on ground
+    
+    // Scale based on type
+    if (predatorType === 'BEETLE') {
+        predMesh.scale.set(1.5, 1.5, 1);
+    }
+    
+    // Add to scene (only visible on surface)
+    scene.add(predMesh);
+    
+    // Store animation details
+    predMesh.userData = {
+        frameIndex: 0,
+        frameTime: 0,
+        frameDuration: 0.2, // Fast animation for predators
+        totalFrames: 9 // Both predator types have 9 frames
+    };
+    
+    // Store predator data
+    const predatorData = {
+        mesh: predMesh,
+        position: position.clone(),
+        predatorType: predatorType,
+        health: predatorConfig.health,
+        damage: predatorConfig.damage,
+        speed: predatorConfig.speed,
+        active: true,
+        state: 'hunting', // hunting, attacking, fleeing
+        target: null,
+        timeToNextAction: Math.random() * 2 // Random initial delay before first action
+    };
+    
+    predators.push(predatorData);
+    console.log(`Predator (${predatorType}) created at ${position.x.toFixed(2)}, ${position.z.toFixed(2)}`);
+    
+    return predatorData;
+}
+
+function updatePredator(predator, deltaTime) {
+    if (!predator.active) return;
+    
+    // Update animation
+    if (predator.mesh && predator.mesh.userData) {
+        predator.mesh.userData.frameTime += deltaTime;
+        if (predator.mesh.userData.frameTime >= predator.mesh.userData.frameDuration) {
+            // Advance to next frame
+            predator.mesh.userData.frameTime = 0;
+            predator.mesh.userData.frameIndex = (predator.mesh.userData.frameIndex + 1) % predator.mesh.userData.totalFrames;
+            
+            // Update the sprite frame
+            updateSpriteFrame(predator.mesh, PREDATOR_TYPES[predator.predatorType].sheet, predator.mesh.userData.frameIndex);
+        }
+    }
+    
+    // Update action timer
+    predator.timeToNextAction -= deltaTime;
+    if (predator.timeToNextAction <= 0) {
+        // Time for a new action
+        
+        // For now, just move randomly
+        const angle = Math.random() * Math.PI * 2;
+        const distance = predator.speed * 2;
+        const newX = predator.position.x + Math.cos(angle) * distance;
+        const newZ = predator.position.z + Math.sin(angle) * distance;
+        
+        // Ensure we stay within bounds
+        const boundedX = Math.max(-PREDATOR_SPAWN_RADIUS, Math.min(PREDATOR_SPAWN_RADIUS, newX));
+        const boundedZ = Math.max(-PREDATOR_SPAWN_RADIUS, Math.min(PREDATOR_SPAWN_RADIUS, newZ));
+        
+        // Update position
+        predator.position.x = boundedX;
+        predator.position.z = boundedZ;
+        predator.mesh.position.x = boundedX;
+        predator.mesh.position.z = boundedZ;
+        
+        // Rotate to face movement direction
+        const angle2D = Math.atan2(boundedZ - predator.mesh.position.z, boundedX - predator.mesh.position.x);
+        predator.mesh.rotation.z = angle2D + Math.PI/2;
+        
+        // Reset action timer
+        predator.timeToNextAction = 1 + Math.random() * 3;
+    }
+}
+    
     // --- Food System Functions ---
     
 function createInitialFoodSources(count) {
@@ -513,34 +678,72 @@ function createInitialFoodSources(count) {
     console.log(`Created ${count} initial food sources`);
 }
 
-function createFoodSource(position) {
+function createFoodSource(position, foodType) {
+    // If no food type specified, pick a random one with a preference for plant-based food
+    if (!foodType) {
+        const rand = Math.random();
+        if (rand < 0.4) {
+            foodType = 'SEEDLING';
+        } else if (rand < 0.6) {
+            foodType = 'LEAF';
+        } else if (rand < 0.8) {
+            foodType = 'SEED';
+        } else if (rand < 0.95) {
+            foodType = 'DECAYED_LEAF';
+        } else {
+            foodType = 'INSECT';
+        }
+    }
+    
+    // Get food data
+    const foodConfig = FOOD_TYPES[foodType];
+    if (!foodConfig) {
+        console.error(`Invalid food type: ${foodType}`);
+        return null;
+    }
+    
+    // Make sure textures are loaded
+    if (!spriteLoader.loaded) {
+        console.log("Waiting for textures to load before creating food...");
+        setTimeout(() => createFoodSource(position, foodType), 500);
+        return null;
+    }
+    
     // Create a plane for the sprite
     const foodGeo = new THREE.PlaneGeometry(1.5, 1.5);
     const foodMat = new THREE.MeshBasicMaterial({
-        map: spriteLoader.textures.seedling,
+        map: spriteLoader.textures[foodConfig.sheet],
         transparent: true,
         alphaTest: 0.5
     });
     
     // Set up UV coordinates for the first frame in sprite sheet
-    const sheet = spriteLoader.spriteSheets.seedling;
+    const sheet = spriteLoader.spriteSheets[foodConfig.sheet];
     const frameWidth = 1 / sheet.cols;
     const frameHeight = 1 / sheet.rows;
     
-    // Use the first frame (growth stage 0)
-    foodGeo.faceVertexUvs[0][0][0].x = 0;
-    foodGeo.faceVertexUvs[0][0][0].y = 1;
-    foodGeo.faceVertexUvs[0][0][1].x = 0;
-    foodGeo.faceVertexUvs[0][0][1].y = 1 - frameHeight;
-    foodGeo.faceVertexUvs[0][0][2].x = frameWidth;
-    foodGeo.faceVertexUvs[0][0][2].y = 1;
+    // Calculate the frame coordinates based on frameStart
+    const frameIndex = foodConfig.frameStart;
+    const colIndex = frameIndex % sheet.cols;
+    const rowIndex = Math.floor(frameIndex / sheet.cols);
     
-    foodGeo.faceVertexUvs[0][1][0].x = 0;
-    foodGeo.faceVertexUvs[0][1][0].y = 1 - frameHeight;
-    foodGeo.faceVertexUvs[0][1][1].x = frameWidth;
-    foodGeo.faceVertexUvs[0][1][1].y = 1 - frameHeight;
-    foodGeo.faceVertexUvs[0][1][2].x = frameWidth;
-    foodGeo.faceVertexUvs[0][1][2].y = 1;
+    const frameX = colIndex * frameWidth;
+    const frameY = rowIndex * frameHeight;
+    
+    // Set UV coordinates for the selected frame
+    foodGeo.faceVertexUvs[0][0][0].x = frameX;
+    foodGeo.faceVertexUvs[0][0][0].y = 1 - frameY;
+    foodGeo.faceVertexUvs[0][0][1].x = frameX;
+    foodGeo.faceVertexUvs[0][0][1].y = 1 - (frameY + frameHeight);
+    foodGeo.faceVertexUvs[0][0][2].x = frameX + frameWidth;
+    foodGeo.faceVertexUvs[0][0][2].y = 1 - frameY;
+    
+    foodGeo.faceVertexUvs[0][1][0].x = frameX;
+    foodGeo.faceVertexUvs[0][1][0].y = 1 - (frameY + frameHeight);
+    foodGeo.faceVertexUvs[0][1][1].x = frameX + frameWidth;
+    foodGeo.faceVertexUvs[0][1][1].y = 1 - (frameY + frameHeight);
+    foodGeo.faceVertexUvs[0][1][2].x = frameX + frameWidth;
+    foodGeo.faceVertexUvs[0][1][2].y = 1 - frameY;
     
     foodGeo.uvsNeedUpdate = true;
     
@@ -550,21 +753,42 @@ function createFoodSource(position) {
     foodMesh.rotation.x = -Math.PI / 2; // Lay flat on ground
     foodMesh.rotation.z = Math.random() * Math.PI * 2; // Random rotation
     
+    // Scale mesh based on food type
+    if (foodType === 'SEEDLING') {
+        foodMesh.scale.set(1.2, 1.2, 1);
+    } else if (foodType === 'INSECT') {
+        foodMesh.scale.set(1.3, 1.3, 1);
+    } else if (foodType === 'SEED') {
+        foodMesh.scale.set(0.7, 0.7, 1); // Seeds smaller
+    }
+    
     // Add to the scene (only visible on surface)
     scene.add(foodMesh);
+    
+    // Store animation details for growth if applicable
+    const hasAnimation = (foodType === 'SEEDLING');
+    foodMesh.userData = {
+        frameIndex: foodConfig.frameStart,
+        frameTime: 0,
+        frameDuration: 1.0, // Slow animation for plants
+        totalFrames: foodConfig.frames
+    };
     
     // Store food data
     const foodData = {
         mesh: foodMesh,
         position: position.clone(),
+        foodType: foodType,
         growthStage: 0,
         growthProgress: 0,
-        amount: FOOD_INITIAL_AMOUNT,
-        active: true
+        maxGrowthStage: foodConfig.frames - 1,
+        amount: foodType === 'SEEDLING' ? FOOD_INITIAL_AMOUNT : foodConfig.value,
+        active: true,
+        canGrow: (foodType === 'SEEDLING') // Only seedlings can grow
     };
     
     foodSources.push(foodData);
-    console.log(`Food source created at ${position.x.toFixed(2)}, ${position.z.toFixed(2)}`);
+    console.log(`Food source (${foodType}) created at ${position.x.toFixed(2)}, ${position.z.toFixed(2)}`);
     
     return foodData;
 }
@@ -759,9 +983,8 @@ function completeDigging(worker) {
     worker.diggingProgress = 0;
     
     // Reset worker appearance
-    const bodyMesh = worker.mesh.children[0];
-    if (bodyMesh && bodyMesh.material && worker.originalBodyColor) {
-        bodyMesh.material.color.set(worker.originalBodyColor);
+    if (worker.mesh && worker.mesh.material && worker.mesh.userData && worker.mesh.userData.originalMaterial) {
+        worker.mesh.material = worker.mesh.userData.originalMaterial.clone();
     }
     
     console.log(`Worker at [${worker.gridX}, ${worker.gridY}] completed digging to [${targetX}, ${targetY}]`);
@@ -937,7 +1160,7 @@ function createWorkerAnt(position) {
         mesh: workerGroup,
         gridX: Math.round((position.x - undergroundGroup.position.x) / voxelSize),
         gridY: Math.round(-(position.y - undergroundGroup.position.y) / voxelSize), // Convert Y to grid coordinate
-        state: 'idle', // Initial state: idle, carrying, digging, etc.
+        state: 'idle', // Initial state: idle, carrying, digging, feeding, foraging, etc.
         target: null,
         timeSinceLastPheromone: 0, // Timer for laying pheromones
         pheromoneCooldown: 1.0 + Math.random() * 0.5, // Random cooldown between 1-1.5 seconds
@@ -946,7 +1169,10 @@ function createWorkerAnt(position) {
         diggingTarget: null, // Target soil voxel for digging
         foodAmount: 0, // How much food the worker is carrying
         targetFoodSource: null, // Reference to targeted food source when foraging
-        forageTimer: 0 // Timer for foraging actions
+        targetLarva: null, // Reference to targeted larva when feeding
+        forageTimer: 0, // Timer for foraging actions
+        feedingProgress: 0, // Progress for feeding larvae (0-1)
+        feedingSpeed: 0.7 + Math.random() * 0.3 // Random feeding speed
     };
     
     workers.push(workerData);
@@ -956,25 +1182,227 @@ function createWorkerAnt(position) {
 }
 
 function hatchEgg(eggData, index) {
-    console.log("Egg hatching!");
+    console.log("Egg hatching into larva!");
     
     // 1. Get position before removing egg
     const eggPosition = eggData.mesh.position.clone();
     
     // 2. Remove visual egg mesh
     undergroundGroup.remove(eggData.mesh);
-    // Optional cleanup
-    // eggData.mesh.geometry.dispose(); // Don't dispose shared geometry!
-    // eggData.mesh.material.dispose(); // Don't dispose shared material!
     
     // 3. Remove from our tracking array
     // Splice is safe here if we iterate backwards or adjust index after removal
     eggs.splice(index, 1);
     
-    // 4. Spawn a worker ant at the egg's position
-    const worker = createWorkerAnt(eggPosition);
+    // 4. Create a larva at the egg's position
+    createLarva(eggPosition);
     
-    console.log(`Egg hatched into worker ant. Remaining eggs: ${eggs.length}`);
+    console.log(`Egg hatched into larva. Remaining eggs: ${eggs.length}`);
+}
+
+function createLarva(position) {
+    // Ensure textures are loaded
+    if (!spriteLoader.loaded) {
+        console.log("Waiting for textures to load before creating larva...");
+        setTimeout(() => createLarva(position), 500);
+        return null;
+    }
+    
+    // Create larva mesh
+    const larvaGeo = new THREE.PlaneGeometry(0.9, 0.6);
+    const larvaMat = new THREE.MeshBasicMaterial({
+        map: spriteLoader.textures.pupae,
+        transparent: true,
+        alphaTest: 0.5
+    });
+    
+    // Set up UV coordinates for the first larva frame (first row)
+    const sheet = spriteLoader.spriteSheets.pupae;
+    const frameWidth = 1 / sheet.cols;
+    const frameHeight = 1 / sheet.rows;
+    
+    // Use the first frame - larvae are in the top row
+    larvaGeo.faceVertexUvs[0][0][0].x = 0;
+    larvaGeo.faceVertexUvs[0][0][0].y = 1;
+    larvaGeo.faceVertexUvs[0][0][1].x = 0;
+    larvaGeo.faceVertexUvs[0][0][1].y = 1 - frameHeight;
+    larvaGeo.faceVertexUvs[0][0][2].x = frameWidth;
+    larvaGeo.faceVertexUvs[0][0][2].y = 1;
+    
+    larvaGeo.faceVertexUvs[0][1][0].x = 0;
+    larvaGeo.faceVertexUvs[0][1][0].y = 1 - frameHeight;
+    larvaGeo.faceVertexUvs[0][1][1].x = frameWidth;
+    larvaGeo.faceVertexUvs[0][1][1].y = 1 - frameHeight;
+    larvaGeo.faceVertexUvs[0][1][2].x = frameWidth;
+    larvaGeo.faceVertexUvs[0][1][2].y = 1;
+    
+    larvaGeo.uvsNeedUpdate = true;
+    
+    // Create mesh
+    const larvaMesh = new THREE.Mesh(larvaGeo, larvaMat);
+    larvaMesh.position.copy(position);
+    larvaMesh.rotation.x = -Math.PI / 2; // Lay flat
+    larvaMesh.position.z = 0.05; // Slightly above ground
+    
+    // Store animation details
+    larvaMesh.userData = {
+        frameIndex: 0,
+        frameTime: 0,
+        frameDuration: 0.6, // Slower animation for larvae (less active)
+        stageFrames: 3, // Use first 3 frames for larvae (curled shapes)
+        pupating: false
+    };
+    
+    // Add to scene
+    undergroundGroup.add(larvaMesh);
+    
+    // Store larva data
+    const larvaData = {
+        mesh: larvaMesh,
+        position: position.clone(),
+        pupationTimer: LARVA_PUPATION_TIME,
+        fedAmount: 0, // How much the larva has been fed (needs to be fed to pupate)
+        needsFood: true, // Flag to indicate if larva needs food
+        gridX: Math.round((position.x - undergroundGroup.position.x) / voxelSize),
+        gridY: Math.round(-(position.y - undergroundGroup.position.y) / voxelSize)
+    };
+    
+    larvae.push(larvaData);
+    console.log(`Larva created. Total larvae: ${larvae.length}`);
+    
+    return larvaData;
+}
+
+function pupatelarva(larvaData, index) {
+    console.log("Larva pupating!");
+    
+    // Get position before removing larva
+    const larvaPosition = larvaData.mesh.position.clone();
+    
+    // Remove larva mesh (we'll reuse it for the pupa with different frame)
+    // Instead of removing, we'll just change the frame to a pupa frame
+    const larvaMesh = larvaData.mesh;
+    
+    // Remove from larvae array
+    larvae.splice(index, 1);
+    
+    // Create pupa data
+    const pupaData = {
+        mesh: larvaMesh, // Reuse the mesh
+        position: larvaPosition.clone(),
+        hatchTimer: PUPA_HATCH_TIME,
+        gridX: larvaData.gridX,
+        gridY: larvaData.gridY,
+        antType: 'worker' // Default to worker, could determine different types later
+    };
+    
+    // Change frame to pupa appearance (frames 6-8 in the sprite sheet)
+    larvaMesh.userData.frameIndex = 6; // Start at pupa frames
+    larvaMesh.userData.stageFrames = 3; // Use 3 frames for pupae
+    updateSpriteFrame(larvaMesh, 'pupae', 6);
+    
+    // Add to pupae array
+    pupae.push(pupaData);
+    console.log(`Pupa created. Total pupae: ${pupae.length}`);
+    
+    return pupaData;
+}
+
+function hatchPupa(pupaData, index) {
+    console.log("Pupa hatching into adult!");
+    
+    // Get position before removing pupa
+    const pupaPosition = pupaData.mesh.position.clone();
+    
+    // Remove pupa mesh
+    undergroundGroup.remove(pupaData.mesh);
+    
+    // Remove from pupae array
+    pupae.splice(index, 1);
+    
+    // Create adult ant based on type
+    if (pupaData.antType === 'worker') {
+        createWorkerAnt(pupaPosition);
+    }
+    // Add other ant types here later (soldier, etc.)
+    
+    console.log(`Pupa hatched into adult. Remaining pupae: ${pupae.length}`);
+}
+
+// --- Feeding System ---
+
+function findHungryLarva() {
+    // Find a larva that needs feeding
+    for (const larva of larvae) {
+        if (larva.needsFood && larva.fedAmount < 10) {
+            return larva;
+        }
+    }
+    return null;
+}
+
+function startFeeding(worker, larva) {
+    if (worker.state === 'feeding') {
+        return false; // Already feeding
+    }
+    
+    if (worker.foodAmount <= 0) {
+        return false; // No food to give
+    }
+    
+    // Set worker state to feeding
+    worker.state = 'feeding';
+    worker.targetLarva = larva;
+    worker.feedingProgress = 0;
+    
+    // Position worker near larva
+    const larvaPos = larva.mesh.position;
+    
+    // Create position vector with slight offset from larva
+    const feedingPos = new THREE.Vector3(
+        larvaPos.x + (Math.random() * 0.4 - 0.2),
+        larvaPos.y + (Math.random() * 0.4 - 0.2),
+        larvaPos.z
+    );
+    
+    // Update worker position
+    worker.mesh.position.copy(feedingPos);
+    
+    // Visual feedback - change worker appearance
+    // Nothing to change with sprite sheets, but could add an indicator
+    
+    console.log(`Worker starting to feed larva. Worker food: ${worker.foodAmount}`);
+    return true;
+}
+
+function completeFeeding(worker) {
+    if (!worker.targetLarva) {
+        console.log("Cannot complete feeding: no target larva");
+        worker.state = 'idle';
+        worker.feedingProgress = 0;
+        return false;
+    }
+    
+    // Calculate how much food to give (between 1-5 units)
+    const feedAmount = Math.min(5, worker.foodAmount);
+    
+    // Transfer food from worker to larva
+    worker.foodAmount -= feedAmount;
+    worker.targetLarva.fedAmount += feedAmount;
+    
+    // Update larva's need status
+    if (worker.targetLarva.fedAmount >= 10) {
+        worker.targetLarva.needsFood = false;
+        console.log("Larva fully fed! Ready to pupate.");
+    }
+    
+    // Reset worker state
+    worker.state = 'idle';
+    worker.targetLarva = null;
+    worker.feedingProgress = 0;
+    
+    console.log(`Worker fed larva ${feedAmount} food units. Worker food remaining: ${worker.foodAmount}`);
+    return true;
 }
 
 
@@ -1059,6 +1487,31 @@ function hatchEgg(eggData, index) {
                             if (intersects.length > 0) {
                                 createFoodSource(intersects[0].point);
                                 console.log("Manual food source created at mouse position");
+                            }
+                        }
+                        break;
+                        
+                    case 'p': // Spawn a predator near mouse position
+                        if (currentView === 'surface') {
+                            // Use the raycaster to find where the mouse is pointing on the ground
+                            raycaster.setFromCamera(mouse, activeCamera);
+                            const intersects = raycaster.intersectObject(groundPlane);
+                            if (intersects.length > 0) {
+                                // Spider is default
+                                createPredator(intersects[0].point, 'SPIDER');
+                                console.log("Spider created at mouse position");
+                            }
+                        }
+                        break;
+                        
+                    case 'b': // Spawn a beetle predator near mouse position
+                        if (currentView === 'surface') {
+                            // Use the raycaster to find where the mouse is pointing on the ground
+                            raycaster.setFromCamera(mouse, activeCamera);
+                            const intersects = raycaster.intersectObject(groundPlane);
+                            if (intersects.length > 0) {
+                                createPredator(intersects[0].point, 'BEETLE');
+                                console.log("Beetle created at mouse position");
                             }
                         }
                         break;
@@ -1166,7 +1619,65 @@ function animate() {
         }
     }
     
-    // 3. Food Source Spawning and Growth
+    // 3. Ant Lifecycle Updates
+    // 3a. Larvae Updates
+    for (let i = larvae.length - 1; i >= 0; i--) {
+        const larva = larvae[i];
+        
+        // Update animation if mesh exists
+        if (larva.mesh && larva.mesh.userData) {
+            larva.mesh.userData.frameTime += deltaTime;
+            if (larva.mesh.userData.frameTime >= larva.mesh.userData.frameDuration) {
+                // Advance to next frame within larva range (first 3 frames)
+                larva.mesh.userData.frameTime = 0;
+                larva.mesh.userData.frameIndex = (larva.mesh.userData.frameIndex + 1) % larva.mesh.userData.stageFrames;
+                
+                // Update the sprite frame - keep in larva frames (0-2)
+                updateSpriteFrame(larva.mesh, 'pupae', larva.mesh.userData.frameIndex);
+            }
+        }
+        
+        // Check if this larva has been fed enough and timer is up
+        if (larva.fedAmount >= 10 && !larva.mesh.userData.pupating) { // Need at least 10 food units to pupate
+            larva.pupationTimer -= deltaTime;
+            if (larva.pupationTimer <= 0) {
+                pupatelarva(larva, i);
+                continue; // Skip to next larva
+            }
+        }
+        
+        // Indicate larva needs food if it hasn't been fed enough
+        if (larva.fedAmount < 10 && !larva.needsFood) {
+            larva.needsFood = true;
+            // Could add visual indicator for hungry larvae here
+        }
+    }
+    
+    // 3b. Pupae Updates
+    for (let i = pupae.length - 1; i >= 0; i--) {
+        const pupa = pupae[i];
+        
+        // Update animation if mesh exists
+        if (pupa.mesh && pupa.mesh.userData) {
+            pupa.mesh.userData.frameTime += deltaTime;
+            if (pupa.mesh.userData.frameTime >= pupa.mesh.userData.frameDuration) {
+                // Advance to next frame within pupa range (frames 6-8)
+                pupa.mesh.userData.frameTime = 0;
+                pupa.mesh.userData.frameIndex = 6 + ((pupa.mesh.userData.frameIndex - 6 + 1) % pupa.mesh.userData.stageFrames);
+                
+                // Update the sprite frame
+                updateSpriteFrame(pupa.mesh, 'pupae', pupa.mesh.userData.frameIndex);
+            }
+        }
+        
+        // Check if pupa is ready to hatch
+        pupa.hatchTimer -= deltaTime;
+        if (pupa.hatchTimer <= 0) {
+            hatchPupa(pupa, i);
+        }
+    }
+    
+    // 4. Food Source Spawning and Growth
     // Only spawn and grow food on the surface
     timeSinceLastFoodSpawn += deltaTime;
     if (timeSinceLastFoodSpawn >= FOOD_SPAWN_INTERVAL) {
@@ -1194,6 +1705,36 @@ function animate() {
             
             // Remove from array (optional)
             // foodSources.splice(i, 1);
+        }
+    }
+    
+    // 5. Predator Spawning and Updates
+    timeSinceLastPredatorSpawn += deltaTime;
+    if (timeSinceLastPredatorSpawn >= PREDATOR_SPAWN_INTERVAL) {
+        if (predators.filter(p => p.active).length < 3) { // Limit total active predators
+            // Random position on surface, further from the center
+            const angle = Math.random() * Math.PI * 2;
+            const distance = PREDATOR_SPAWN_RADIUS * 0.7 + Math.random() * PREDATOR_SPAWN_RADIUS * 0.3;
+            const x = Math.cos(angle) * distance;
+            const z = Math.sin(angle) * distance;
+            
+            createPredator(new THREE.Vector3(x, 0.05, z));
+        }
+        timeSinceLastPredatorSpawn = PREDATOR_SPAWN_INTERVAL * (0.8 + Math.random() * 0.4); // Vary the interval slightly
+    }
+    
+    // Update all predators
+    for (let i = predators.length - 1; i >= 0; i--) {
+        const predator = predators[i];
+        updatePredator(predator, deltaTime);
+        
+        // Clean up dead predators
+        if (!predator.active && predator.mesh) {
+            scene.remove(predator.mesh);
+            predator.mesh = null;
+            
+            // Remove from array
+            predators.splice(i, 1);
         }
     }
     
@@ -1270,7 +1811,34 @@ function animate() {
                 completeDigging(worker);
             }
         }
+        else if (worker.state === 'feeding') {
+            // Update feeding progress
+            worker.feedingProgress += worker.feedingSpeed * deltaTime;
+            
+            // Visual feedback - slight movement while feeding
+            if (worker.mesh) {
+                const moveAmount = Math.sin(Date.now() * 0.02) * 0.03;
+                worker.mesh.position.x += moveAmount;
+                worker.mesh.position.y += moveAmount;
+            }
+            
+            // Check if feeding is complete
+            if (worker.feedingProgress >= 1.0) {
+                completeFeeding(worker);
+            }
+        }
         else if (worker.state === 'idle') {
+            // Check if carrying food and there are hungry larvae - opportunity to feed
+            if (worker.foodAmount > 0 && larvae.length > 0) {
+                // Random chance to look for larvae to feed (10% per second)
+                if (Math.random() < 0.1 * deltaTime) {
+                    const hungryLarva = findHungryLarva();
+                    if (hungryLarva) {
+                        startFeeding(worker, hungryLarva);
+                        continue; // Skip to next worker
+                    }
+                }
+            }
             // Lay HOME pheromone if enough time has passed
             if (worker.timeSinceLastPheromone >= worker.pheromoneCooldown) {
                 // Create position vector
@@ -1383,15 +1951,24 @@ window.queenMesh = queenMesh;
 window.queenGridX = queenGridX;
 window.queenGridY = queenGridY;
 window.eggs = eggs;
+window.larvae = larvae;
+window.pupae = pupae;
 window.workers = workers;
 window.pheromones = pheromones;
 window.foodSources = foodSources;
+window.predators = predators;
 window.PHEROMONE_TYPES = PHEROMONE_TYPES;
+window.FOOD_TYPES = FOOD_TYPES;
+window.PREDATOR_TYPES = PREDATOR_TYPES;
 window.createPheromone = createPheromone;
 window.createFoodSource = createFoodSource;
+window.createPredator = createPredator;
 window.harvestFood = harvestFood;
 window.findAdjacentSoil = findAdjacentSoil;
 window.startDigging = startDigging;
+window.startFeeding = startFeeding;
+window.findHungryLarva = findHungryLarva;
+window.colonyFoodReserve = colonyFoodReserve;
 window.voxelGrid = voxelGrid;
 window.undergroundWidth = undergroundWidth;
 window.undergroundHeight = undergroundHeight;
