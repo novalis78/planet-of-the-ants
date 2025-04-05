@@ -19,6 +19,15 @@ let eggGeometry, eggMaterial; // Shared resources for efficiency
 let workers = []; // Array to store worker ant data
 const WORKER_SPEED = 0.5; // Movement speed of worker ants
 
+// Pheromone system
+let pheromones = []; // Array to store pheromone data
+const PHEROMONE_TYPES = {
+    HOME: { color: 0x0000ff, strength: 1.0, decayRate: 0.05 },  // Blue
+    FOOD: { color: 0x00ff00, strength: 1.0, decayRate: 0.05 },  // Green
+    DANGER: { color: 0xff0000, strength: 1.0, decayRate: 0.08 } // Red (decays faster)
+};
+const PHEROMONE_INFLUENCE_RADIUS = 1.5; // How far ants can detect pheromones
+
 // NEW: Underground representation
 const undergroundWidth = 20; // How many voxels wide (X axis)
 const undergroundHeight = 10; // How many voxels high (Y axis)
@@ -360,7 +369,99 @@ function onClick(event) {
         console.log(`Egg laid at [${queenGridX}, ${queenGridY}]. Total eggs: ${eggs.length}`);
     }
 
-    // Worker ant creation function
+    // --- Pheromone System Functions ---
+    
+function createPheromone(position, type, initialStrength = 1.0) {
+    // Create visual representation
+    const pheroGeo = new THREE.CircleGeometry(0.2, 8); // Small circle
+    const pheroMat = new THREE.MeshBasicMaterial({ 
+        color: PHEROMONE_TYPES[type].color,
+        transparent: true,
+        opacity: 0.6,
+        side: THREE.DoubleSide
+    });
+    const pheroMesh = new THREE.Mesh(pheroGeo, pheroMat);
+    
+    // Position slightly above ground to prevent z-fighting
+    pheroMesh.position.copy(position);
+    pheroMesh.position.z = 0.01;
+    pheroMesh.rotation.x = -Math.PI / 2; // Lay flat
+    
+    undergroundGroup.add(pheroMesh);
+    
+    // Convert to grid coordinates for logic
+    const gridX = Math.round((position.x - undergroundGroup.position.x) / voxelSize);
+    const gridY = Math.round(-(position.y - undergroundGroup.position.y) / voxelSize);
+    
+    // Store pheromone data
+    const pheromoneData = {
+        mesh: pheroMesh,
+        type: type,
+        gridX: gridX,
+        gridY: gridY,
+        strength: initialStrength,
+        decayRate: PHEROMONE_TYPES[type].decayRate
+    };
+    
+    pheromones.push(pheromoneData);
+    console.log(`Pheromone (${type}) created at [${gridX}, ${gridY}]`);
+    
+    return pheromoneData;
+}
+
+function findNearbyPheromones(gridX, gridY, type = null, radius = PHEROMONE_INFLUENCE_RADIUS) {
+    // Find all pheromones of the specified type (or any type if null) within radius
+    return pheromones.filter(pheromone => {
+        // Skip if looking for specific type and this isn't it
+        if (type && pheromone.type !== type) return false;
+        
+        // Calculate grid distance
+        const distance = Math.sqrt(
+            Math.pow(pheromone.gridX - gridX, 2) + 
+            Math.pow(pheromone.gridY - gridY, 2)
+        );
+        
+        return distance <= radius;
+    });
+}
+
+function getStrongestPheromoneDirection(gridX, gridY, type) {
+    const nearbyPheromones = findNearbyPheromones(gridX, gridY, type);
+    
+    if (nearbyPheromones.length === 0) return null;
+    
+    // Find the strongest pheromone weighted by distance
+    let strongestPheromone = null;
+    let highestScore = 0;
+    
+    for (const pheromone of nearbyPheromones) {
+        const distance = Math.sqrt(
+            Math.pow(pheromone.gridX - gridX, 2) + 
+            Math.pow(pheromone.gridY - gridY, 2)
+        );
+        
+        // Avoid division by zero
+        const effectiveDistance = Math.max(0.1, distance);
+        
+        // Score based on strength and inverse distance
+        const score = pheromone.strength / effectiveDistance;
+        
+        if (score > highestScore) {
+            highestScore = score;
+            strongestPheromone = pheromone;
+        }
+    }
+    
+    if (!strongestPheromone) return null;
+    
+    // Calculate direction toward pheromone
+    return {
+        dx: Math.sign(strongestPheromone.gridX - gridX),
+        dy: Math.sign(strongestPheromone.gridY - gridY)
+    };
+}
+
+    // --- Worker Ant Functions ---
 
 function createWorkerAnt(position) {
     // Create worker ant mesh
@@ -399,10 +500,12 @@ function createWorkerAnt(position) {
     // Store worker data
     const workerData = {
         mesh: workerGroup,
-        gridX: Math.round(position.x / voxelSize),
-        gridY: Math.round(-position.y / voxelSize), // Convert Y to grid coordinate
+        gridX: Math.round((position.x - undergroundGroup.position.x) / voxelSize),
+        gridY: Math.round(-(position.y - undergroundGroup.position.y) / voxelSize), // Convert Y to grid coordinate
         state: 'idle', // Initial state: idle, carrying, digging, etc.
-        target: null
+        target: null,
+        timeSinceLastPheromone: 0, // Timer for laying pheromones
+        pheromoneCooldown: 1.0 + Math.random() * 0.5 // Random cooldown between 1-1.5 seconds
     };
     
     workers.push(workerData);
@@ -461,6 +564,29 @@ function hatchEgg(eggData, index) {
     
             if (dx !== 0 || dy !== 0) {
                 moveQueenUnderground(dx, dy);
+            }
+        }
+        
+        // Debug keys for pheromones
+        if (currentView === 'underground') {
+            // Use number keys to place different pheromone types at the queen's position
+            if (queenMesh && queenMesh.visible) {
+                const queenPos = new THREE.Vector3().copy(queenMesh.position);
+                
+                switch (event.key) {
+                    case '1': // HOME pheromone
+                        createPheromone(queenPos, 'HOME', 1.0);
+                        console.log("Manual HOME pheromone placed at queen");
+                        break;
+                    case '2': // FOOD pheromone
+                        createPheromone(queenPos, 'FOOD', 1.0);
+                        console.log("Manual FOOD pheromone placed at queen");
+                        break;
+                    case '3': // DANGER pheromone
+                        createPheromone(queenPos, 'DANGER', 1.0);
+                        console.log("Manual DANGER pheromone placed at queen");
+                        break;
+                }
             }
         }
     }
@@ -564,14 +690,77 @@ function animate() {
         }
     }
     
-    // 3. Worker Ant Behavior
+    // 3. Pheromone Decay
+    for (let i = pheromones.length - 1; i >= 0; i--) {
+        const pheromone = pheromones[i];
+        
+        // Reduce strength over time
+        pheromone.strength -= pheromone.decayRate * deltaTime;
+        
+        // Update visual appearance (opacity)
+        if (pheromone.mesh && pheromone.mesh.material) {
+            pheromone.mesh.material.opacity = Math.min(0.6, pheromone.strength * 0.5);
+            
+            // Scale based on strength
+            const scale = 0.2 + (pheromone.strength * 0.1);
+            pheromone.mesh.scale.set(scale, scale, 1);
+        }
+        
+        // Remove pheromone if it's too weak
+        if (pheromone.strength <= 0.1) {
+            undergroundGroup.remove(pheromone.mesh);
+            pheromones.splice(i, 1);
+        }
+    }
+    
+    // 4. Worker Ant Behavior
     for (let i = 0; i < workers.length; i++) {
         const worker = workers[i];
         
-        // Simple random movement for now
+        // Update pheromone laying cooldown
+        worker.timeSinceLastPheromone += deltaTime;
+        
+        // Worker states
         if (worker.state === 'idle') {
-            // 10% chance per second to move in a random direction
-            if (Math.random() < 0.1 * deltaTime) {
+            // Lay HOME pheromone if enough time has passed
+            if (worker.timeSinceLastPheromone >= worker.pheromoneCooldown) {
+                // Create position vector
+                const pheromonePos = new THREE.Vector3(
+                    (worker.gridX * voxelSize) + undergroundGroup.position.x,
+                    (-worker.gridY * voxelSize) + undergroundGroup.position.y,
+                    0.01
+                );
+                
+                // 15% chance to lay HOME pheromone when idle
+                if (Math.random() < 0.15) {
+                    createPheromone(pheromonePos, 'HOME', 0.7 + Math.random() * 0.3);
+                    worker.timeSinceLastPheromone = 0;
+                }
+            }
+            
+            // Decide how to move - 70% chance to follow pheromones if any, otherwise random movement
+            let movementDirection = null;
+            
+            // Try to detect pheromones (small chance to ignore them to encourage exploration)
+            if (Math.random() < 0.7) {
+                // First try FOOD pheromones (higher priority)
+                movementDirection = getStrongestPheromoneDirection(worker.gridX, worker.gridY, 'FOOD');
+                
+                // If no FOOD pheromones, check DANGER and avoid them
+                if (!movementDirection && Math.random() < 0.8) {
+                    const dangerDirection = getStrongestPheromoneDirection(worker.gridX, worker.gridY, 'DANGER');
+                    if (dangerDirection) {
+                        // Move away from danger (opposite direction)
+                        movementDirection = {
+                            dx: -dangerDirection.dx,
+                            dy: -dangerDirection.dy
+                        };
+                    }
+                }
+            }
+            
+            // If no pheromone influence or decided to move randomly
+            if (!movementDirection && Math.random() < 0.1 * deltaTime) {
                 // Pick a random direction
                 const directions = [
                     { dx: 1, dy: 0 },  // Right
@@ -580,9 +769,13 @@ function animate() {
                     { dx: 0, dy: -1 }  // Up
                 ];
                 
-                const randomDir = directions[Math.floor(Math.random() * directions.length)];
-                const targetX = worker.gridX + randomDir.dx;
-                const targetY = worker.gridY + randomDir.dy;
+                movementDirection = directions[Math.floor(Math.random() * directions.length)];
+            }
+            
+            // If we have a direction to move, try moving
+            if (movementDirection) {
+                const targetX = worker.gridX + movementDirection.dx;
+                const targetY = worker.gridY + movementDirection.dy;
                 
                 // Check if move is valid (within bounds and not into soil)
                 if (targetX >= 0 && targetX < undergroundWidth && 
@@ -601,9 +794,9 @@ function animate() {
                     worker.mesh.position.set(visualX, visualY, worker.mesh.position.z);
                     
                     // Update orientation based on movement direction
-                    if (randomDir.dx !== 0) {
+                    if (movementDirection.dx !== 0) {
                         // Moving horizontally, rotate to face direction
-                        worker.mesh.rotation.y = randomDir.dx > 0 ? 0 : Math.PI;
+                        worker.mesh.rotation.y = movementDirection.dx > 0 ? 0 : Math.PI;
                     }
                 }
             }
@@ -624,6 +817,9 @@ window.queenGridX = queenGridX;
 window.queenGridY = queenGridY;
 window.eggs = eggs;
 window.workers = workers;
+window.pheromones = pheromones;
+window.PHEROMONE_TYPES = PHEROMONE_TYPES;
+window.createPheromone = createPheromone;
 window.undergroundWidth = undergroundWidth;
 window.undergroundHeight = undergroundHeight;
 window.scene = scene;

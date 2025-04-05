@@ -16,6 +16,13 @@ package-lock.json
 /dist
 /build
 
+# Screenshots
+screenshots/
+*.png
+*.jpg
+*.jpeg
+*.gif
+
 # System files
 .DS_Store
 Thumbs.db
