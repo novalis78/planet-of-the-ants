@@ -1,0 +1,22 @@
+{
+  "name": "planet-of-the-ants",
+  "version": "1.0.0",
+  "description": "A realistic ant colony simulation game",
+  "main": "main.js",
+  "scripts": {
+    "start": "http-server -c-1",
+    "screenshot": "node screenshot.js",
+    "monitor": "node game-monitor.js",
+    "debug": "node debug-helper.js",
+    "dev": "http-server -c-1 & sleep 2 && node debug-helper.js",
+    "capture": "http-server -c-1 & sleep 5 && node screenshot.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": ["simulation", "ants", "game", "threejs"],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "http-server": "^14.1.1",
+    "puppeteer": "^24.6.0"
+  }
+}
